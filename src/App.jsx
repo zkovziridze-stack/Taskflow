@@ -5,7 +5,8 @@ import {
   CheckCircle2, Circle, Clock, AlertTriangle, User,
   Paperclip, Repeat, ChevronLeft, ChevronRight, GripVertical, Check,
   Download, Upload, Timer, Play, Pause, RotateCcw, ChevronDown,
-  ArrowUp, ArrowDown, Link2, Palette, Image as ImageIcon
+  ArrowUp, ArrowDown, Link2, Palette, Image as ImageIcon,
+  Layers, Pencil, Mail
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- */
@@ -25,17 +26,30 @@ const PRIORITY_MAP = Object.fromEntries(PRIORITIES.map((p) => [p.key, p]));
 
 const STATUSES = [
   { key: "todo", label: "To Do", color: "#9CA3AF" },
+  { key: "waiting", label: "Waiting", color: "#A78BFA" },
   { key: "inprogress", label: "In Progress", color: "#5B5BD6" },
   { key: "done", label: "Done", color: "#2DD4BF" },
 ];
 const STATUS_MAP = Object.fromEntries(STATUSES.map((s) => [s.key, s]));
 
-const DEFAULT_CATEGORIES = [
+const DEFAULT_CATEGORIES_BASE = [
   { name: "Work", color: "#5B5BD6" },
   { name: "Personal", color: "#F5A524" },
   { name: "Growth", color: "#2DD4BF" },
   { name: "Admin", color: "#FB7185" },
 ];
+const CATEGORY_PALETTE = ["#5B5BD6", "#2DD4BF", "#FB7185", "#F5A524", "#38BDF8", "#A78BFA", "#F472B6", "#34D399", "#FBBF24", "#60A5FA", "#EF4444"];
+const NEW_CATEGORY_NAMES = ["Marketing", "Displays", "Project Part", "Logistic", "Issues", "GW", "Trainings", "Forecast", "Reply", "Call", "Orders"];
+const DEFAULT_CATEGORIES = [
+  ...DEFAULT_CATEGORIES_BASE,
+  ...NEW_CATEGORY_NAMES.map((name, i) => ({ name, color: CATEGORY_PALETTE[i % CATEGORY_PALETTE.length] })),
+];
+function mergeCategories(saved, defaults) {
+  const map = new Map();
+  defaults.forEach((c) => map.set(c.name, c));
+  (saved || []).forEach((c) => map.set(c.name, c));
+  return Array.from(map.values());
+}
 
 const RECUR_OPTIONS = [
   { key: "daily", label: "Daily" },
@@ -90,6 +104,13 @@ function fileToDataUrl(file) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+function normalizeTask(t) {
+  return {
+    emailLink: "", endTime: null, projectId: null, parentTaskId: null,
+    notesImages: [], attachments: [], tags: [], subtasks: [],
+    ...t,
+  };
 }
 
 /* ---------------------------------------------------------------------- */
@@ -207,10 +228,11 @@ function MomentumRing({ tasks, tk, accent }) {
   const total = tasks.length || 1;
   const done = tasks.filter((t) => t.status === "done").length;
   const inprog = tasks.filter((t) => t.status === "inprogress").length;
+  const waiting = tasks.filter((t) => t.status === "waiting").length;
   const overdue = tasks.filter((t) => isOverdue(t)).length;
-  const todo = Math.max(total - done - inprog, 0);
+  const todo = Math.max(total - done - inprog - waiting, 0);
   const segs = [
-    { v: done, color: "#2DD4BF" }, { v: inprog, color: accent },
+    { v: done, color: "#2DD4BF" }, { v: inprog, color: accent }, { v: waiting, color: "#A78BFA" },
     { v: overdue, color: "#FB7185" }, { v: Math.max(todo - overdue, 0), color: tk.border },
   ];
   const R = 54, C = 2 * Math.PI * R;
@@ -233,7 +255,7 @@ function MomentumRing({ tasks, tk, accent }) {
       <div className="flex-1">
         <div className="text-sm font-semibold mb-2" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }}>Momentum</div>
         <div className="space-y-1.5">
-          {[["Done", "#2DD4BF", done], ["In progress", accent, inprog], ["Overdue", "#FB7185", overdue], ["To do", tk.textFaint, Math.max(todo - overdue, 0)]].map(([label, color, v]) => (
+          {[["Done", "#2DD4BF", done], ["In progress", accent, inprog], ["Waiting", "#A78BFA", waiting], ["Overdue", "#FB7185", overdue], ["To do", tk.textFaint, Math.max(todo - overdue, 0)]].map(([label, color, v]) => (
             <div key={label} className="flex items-center gap-2 text-xs">
               <span className="w-2 h-2 rounded-full" style={{ background: color }} />
               <span style={{ color: tk.textMuted }} className="flex-1">{label}</span>
@@ -298,7 +320,7 @@ function BoardView({ tasks, tk, onOpen, onMove, categories, taskMap }) {
   const [dragOverCol, setDragOverCol] = useState(null);
   const onDragStart = (e, id) => e.dataTransfer.setData("text/plain", id);
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {STATUSES.map((col) => {
         const colTasks = tasks.filter((t) => t.status === col.key);
         return (
@@ -409,7 +431,7 @@ function DayTasksModal({ date, tasks, tk, onOpen, onClose, onCreate }) {
 /* Calendar view — month / week / day with hourly grid                     */
 /* ---------------------------------------------------------------------- */
 
-function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMode, onCreateOnDate, accent }) {
+function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMode, onCreateOnDate, onReschedule, accent }) {
   const [dayModalDate, setDayModalDate] = useState(null);
 
   const byDate = useMemo(() => {
@@ -423,9 +445,17 @@ function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMod
     const map = {};
     tasks.forEach((t) => {
       if (!t.dueDate) return;
-      const dt = new Date(t.dueDate);
-      const k = `${dateKey(t.dueDate)}-${dt.getHours()}`;
-      (map[k] = map[k] || []).push(t);
+      const start = new Date(t.dueDate);
+      const startHour = start.getHours();
+      let endHour = startHour;
+      if (t.endTime) {
+        const end = new Date(t.endTime);
+        if (dateKey(end) === dateKey(start) && end.getHours() >= startHour) endHour = end.getHours();
+      }
+      for (let h = startHour; h <= endHour; h++) {
+        const k = `${dateKey(start)}-${h}`;
+        (map[k] = map[k] || []).push({ task: t, isStart: h === startHour });
+      }
     });
     return map;
   }, [tasks]);
@@ -442,6 +472,23 @@ function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMod
     else if (mode === "week") d.setDate(d.getDate() + dir * 7);
     else d.setDate(d.getDate() + dir);
     setFocusDate(d);
+  };
+
+  const onDayReschedule = (taskId, dateObj) => {
+    const original = tasks.find((t) => t.id === taskId);
+    if (!original || !original.dueDate) return;
+    const od = new Date(original.dueDate);
+    const nd = new Date(dateObj);
+    nd.setHours(od.getHours(), od.getMinutes(), 0, 0);
+    onReschedule(taskId, nd.toISOString());
+  };
+  const onHourReschedule = (taskId, dateObj, hour) => {
+    const original = tasks.find((t) => t.id === taskId);
+    if (!original || !original.dueDate) return;
+    const od = new Date(original.dueDate);
+    const nd = new Date(dateObj);
+    nd.setHours(hour, od.getMinutes(), 0, 0);
+    onReschedule(taskId, nd.toISOString());
   };
 
   const headerLabel = mode === "month"
@@ -468,16 +515,20 @@ function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMod
 
       {mode === "month" && (
         <MonthGrid focusDate={focusDate} byDate={byDate} tk={tk} todayKey={todayKey} onOpen={onOpen}
-          onCreateOnDate={onCreateOnDate} onShowDay={(d) => setDayModalDate(d)} />
+          onCreateOnDate={onCreateOnDate} onShowDay={(d) => setDayModalDate(d)} onReschedule={onDayReschedule} />
       )}
 
       {mode === "week" && (
         <HourGrid days={Array.from({ length: 7 }, (_, i) => new Date(startOfWeek(focusDate).getTime() + i * 86400000))}
-          byDateHour={byDateHour} tk={tk} todayKey={todayKey} onOpen={onOpen} accent={accent} />
+          byDateHour={byDateHour} tk={tk} todayKey={todayKey} onOpen={onOpen} accent={accent}
+          onCreateAt={(d, h) => { const dt = new Date(d); dt.setHours(h, 0, 0, 0); onCreateOnDate(dt); }}
+          onReschedule={onHourReschedule} />
       )}
 
       {mode === "day" && (
-        <HourGrid days={[focusDate]} byDateHour={byDateHour} tk={tk} todayKey={todayKey} onOpen={onOpen} accent={accent} wide />
+        <HourGrid days={[focusDate]} byDateHour={byDateHour} tk={tk} todayKey={todayKey} onOpen={onOpen} accent={accent} wide
+          onCreateAt={(d, h) => { const dt = new Date(d); dt.setHours(h, 0, 0, 0); onCreateOnDate(dt); }}
+          onReschedule={onHourReschedule} />
       )}
 
       {dayModalDate && (
@@ -489,7 +540,8 @@ function CalendarView({ tasks, tk, onOpen, focusDate, setFocusDate, mode, setMod
   );
 }
 
-function MonthGrid({ focusDate, byDate, tk, todayKey, onOpen, onCreateOnDate, onShowDay }) {
+function MonthGrid({ focusDate, byDate, tk, todayKey, onOpen, onCreateOnDate, onShowDay, onReschedule }) {
+  const [dragOverKey, setDragOverKey] = useState(null);
   const year = focusDate.getFullYear(), m = focusDate.getMonth();
   const first = new Date(year, m, 1);
   const startWeekday = first.getDay();
@@ -513,16 +565,21 @@ function MonthGrid({ focusDate, byDate, tk, todayKey, onOpen, onCreateOnDate, on
           const dayTasks = byDate[k] || [];
           const isToday = k === todayKey;
           const dateObj = new Date(year, m, d);
+          const dragOver = dragOverKey === k;
           return (
-            <div key={i} className="rounded-lg p-2 flex flex-col group" style={{ minHeight: 118, background: isToday ? tk.surfaceAlt : "transparent", border: `1px solid ${isToday ? "#5B5BD6" : tk.border}` }}>
+            <div key={i} className="rounded-lg p-2 flex flex-col group" style={{ minHeight: 118, background: dragOver ? tk.surfaceAlt : isToday ? tk.surfaceAlt : "transparent", border: `1px solid ${dragOver ? "#5B5BD6" : isToday ? "#5B5BD6" : tk.border}` }}
+              onDragOver={(e) => { e.preventDefault(); setDragOverKey(k); }}
+              onDragLeave={() => setDragOverKey((cur) => (cur === k ? null : cur))}
+              onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if (id) onReschedule(id, dateObj); setDragOverKey(null); }}>
               <div className="flex items-center justify-between">
                 <button onClick={() => onShowDay(dateObj)} className="text-sm font-semibold" style={{ color: isToday ? "#5B5BD6" : tk.textMuted, fontFamily: "IBM Plex Mono, monospace" }}>{d}</button>
                 <button onClick={() => onCreateOnDate(dateObj)} className="opacity-0 group-hover:opacity-100" style={{ color: tk.textFaint }}><Plus size={13} /></button>
               </div>
               <div className="flex-1 space-y-1 mt-1.5 overflow-hidden">
                 {dayTasks.slice(0, 3).map((t) => (
-                  <div key={t.id} onClick={() => onOpen(t)} title={t.title}
-                    className="text-[11px] px-1.5 py-1 rounded truncate cursor-pointer"
+                  <div key={t.id} draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", t.id)}
+                    onClick={() => onOpen(t)} title={t.title}
+                    className="text-[11px] px-1.5 py-1 rounded truncate cursor-grab active:cursor-grabbing"
                     style={{ background: `${PRIORITY_MAP[t.priority].color}22`, color: tk.text, textDecoration: t.status === "done" ? "line-through" : "none" }}>
                     {t.title}
                   </div>
@@ -539,7 +596,8 @@ function MonthGrid({ focusDate, byDate, tk, todayKey, onOpen, onCreateOnDate, on
   );
 }
 
-function HourGrid({ days, byDateHour, tk, todayKey, onOpen, accent, wide }) {
+function HourGrid({ days, byDateHour, tk, todayKey, onOpen, accent, wide, onCreateAt, onReschedule }) {
+  const [dragOverKey, setDragOverKey] = useState(null);
   return (
     <div className="overflow-y-auto rounded-lg" style={{ maxHeight: 560, border: `1px solid ${tk.border}` }}>
       <div className="grid" style={{ gridTemplateColumns: `56px repeat(${days.length}, minmax(${wide ? 180 : 90}px, 1fr))` }}>
@@ -561,14 +619,25 @@ function HourGrid({ days, byDateHour, tk, todayKey, onOpen, accent, wide }) {
             {days.map((d) => {
               const k = `${dateKey(d)}-${h}`;
               const items = byDateHour[k] || [];
+              const dragOver = dragOverKey === k;
               return (
-                <div key={k} className="p-1 space-y-1" style={{ borderTop: `1px solid ${tk.border}`, borderLeft: `1px solid ${tk.border}`, minHeight: 40 }}>
-                  {items.map((t) => (
-                    <div key={t.id} onClick={() => onOpen(t)} title={t.title}
-                      className="text-[10px] px-1.5 py-0.5 rounded truncate cursor-pointer"
-                      style={{ background: `${PRIORITY_MAP[t.priority].color}22`, color: tk.text, textDecoration: t.status === "done" ? "line-through" : "none" }}>
-                      {t.title}
-                    </div>
+                <div key={k} className="p-1 space-y-1 cursor-pointer" style={{ borderTop: `1px solid ${tk.border}`, borderLeft: `1px solid ${tk.border}`, minHeight: 40, background: dragOver ? `${accent}14` : "transparent" }}
+                  onClick={() => onCreateAt(d, h)}
+                  onDragOver={(e) => { e.preventDefault(); setDragOverKey(k); }}
+                  onDragLeave={() => setDragOverKey((cur) => (cur === k ? null : cur))}
+                  onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if (id) onReschedule(id, d, h); setDragOverKey(null); }}>
+                  {items.map(({ task: t, isStart }) => (
+                    isStart ? (
+                      <div key={t.id} draggable onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData("text/plain", t.id); }}
+                        onClick={(e) => { e.stopPropagation(); onOpen(t); }} title={t.title}
+                        className="text-[10px] px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing"
+                        style={{ background: `${PRIORITY_MAP[t.priority].color}22`, color: tk.text, textDecoration: t.status === "done" ? "line-through" : "none" }}>
+                        {t.title}
+                      </div>
+                    ) : (
+                      <div key={t.id} onClick={(e) => { e.stopPropagation(); onOpen(t); }} title={`${t.title} (busy)`}
+                        className="h-2 rounded cursor-pointer" style={{ background: `${PRIORITY_MAP[t.priority].color}55` }} />
+                    )
                   ))}
                 </div>
               );
@@ -642,7 +711,8 @@ function Pomodoro({ tk, tasks, onAddTime, accent }) {
 
 const emptyTask = (defaults = {}) => ({
   id: uid(), title: "", description: "", priority: "medium", status: "todo",
-  dueDate: null, category: "", tags: [], assignee: "", recurring: null, dependsOn: null,
+  dueDate: null, endTime: null, category: "", tags: [], assignee: "", recurring: null, dependsOn: null,
+  emailLink: "", projectId: null, parentTaskId: null,
   subtasks: [], notes: "", notesImages: [], attachments: [], timeSpent: 0,
   createdAt: new Date().toISOString(), completedAt: null, ...defaults,
 });
@@ -755,19 +825,41 @@ function TaskModal({ task, tk, categories, allTasks, onClose, onSave, onDelete, 
                 className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle} />
             </div>
             <div>
+              <label className={labelCls} style={{ color: tk.textMuted }}>Busy until (optional)</label>
+              <input type="datetime-local" value={form.endTime ? toLocalInputValue(form.endTime) : ""}
+                onChange={(e) => update({ endTime: e.target.value ? new Date(e.target.value).toISOString() : null })}
+                className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle} />
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: tk.textMuted }}><Mail size={12} className="inline mr-1" />Outlook email link (optional)</label>
+            <div className="flex gap-2">
+              <input value={form.emailLink || ""} onChange={(e) => update({ emailLink: e.target.value })} placeholder="Paste the email/message link here"
+                className="flex-1 text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle} />
+              {form.emailLink && (
+                <a href={form.emailLink} target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1" style={{ background: tk.surfaceAlt, color: tk.text }}>
+                  <Mail size={13} /> Open
+                </a>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
               <label className={labelCls} style={{ color: tk.textMuted }}>Category</label>
               <select value={form.category} onChange={(e) => update({ category: e.target.value })} className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle}>
                 <option value="">None</option>
                 {categories.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
               </select>
             </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls} style={{ color: tk.textMuted }}>Assignee (optional)</label>
               <input value={form.assignee} onChange={(e) => update({ assignee: e.target.value })} placeholder="Name" className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle} />
             </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls} style={{ color: tk.textMuted }}>Recurring</label>
               <select value={form.recurring?.frequency || ""} onChange={(e) => update({ recurring: e.target.value ? { frequency: e.target.value } : null })}
@@ -959,6 +1051,151 @@ function CustomizePopover({ tk, settings, setSettings, onClose }) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Projects sidebar (left)                                                 */
+/* ---------------------------------------------------------------------- */
+
+function ProjectsSidebar({ tk, open, onClose, projects, tasks, onSelect, onCreate, onRename, onDelete, accent }) {
+  const [newName, setNewName] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editValue, setEditValue] = useState("");
+  if (!open) return null;
+
+  const submit = () => {
+    if (!newName.trim()) return;
+    onCreate(newName.trim());
+    setNewName("");
+  };
+
+  return (
+    <div className="fixed inset-0 z-[140] flex" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-72 h-full overflow-y-auto p-4" style={{ background: tk.surface, borderRight: `1px solid ${tk.border}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <span className="text-sm font-semibold" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }}>Projects</span>
+          <IconBtn tk={tk} title="Close" onClick={onClose}><X size={16} /></IconBtn>
+        </div>
+        <div className="space-y-1 mb-4">
+          {projects.length === 0 && <div className="text-xs" style={{ color: tk.textFaint }}>No projects yet.</div>}
+          {projects.map((p) => {
+            const count = tasks.filter((t) => t.projectId === p.id).length;
+            const editing = editingId === p.id;
+            return (
+              <div key={p.id} className="group flex items-center gap-1.5 rounded-lg px-2 py-1.5" style={{ background: tk.surfaceAlt }}>
+                {editing ? (
+                  <input value={editValue} onChange={(e) => setEditValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && editValue.trim()) { onRename(p.id, editValue.trim()); setEditingId(null); } if (e.key === "Escape") setEditingId(null); }}
+                    autoFocus className="flex-1 text-sm bg-transparent outline-none" style={{ color: tk.text }} />
+                ) : (
+                  <button onClick={() => onSelect(p.id)} className="flex-1 text-left text-sm truncate" style={{ color: tk.text }}>{p.name}</button>
+                )}
+                <span className="text-[10px]" style={{ color: tk.textFaint }}>{count}</span>
+                <button onClick={() => { setEditingId(p.id); setEditValue(p.name); }} className="opacity-0 group-hover:opacity-100"><Pencil size={12} style={{ color: tk.textFaint }} /></button>
+                <button onClick={() => onDelete(p.id)} className="opacity-0 group-hover:opacity-100"><Trash2 size={12} style={{ color: "#FB7185" }} /></button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-2">
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="New project name…" className="flex-1 text-sm rounded-lg px-3 py-1.5 outline-none" style={{ background: tk.surfaceAlt, color: tk.text, border: `1px solid ${tk.border}` }} />
+          <button onClick={submit} className="px-2.5 py-1.5 rounded-lg text-white" style={{ background: accent }}><Plus size={14} /></button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Project tree                                                            */
+/* ---------------------------------------------------------------------- */
+
+function TreeNode({ task, tasks, tk, onOpen, onAddChild }) {
+  const children = tasks.filter((t) => t.parentTaskId === task.id);
+  const done = task.status === "done";
+  return (
+    <div className="mb-2">
+      <div className="group relative flex items-center gap-2 rounded-lg px-3 py-2 cursor-pointer transition-shadow"
+        style={{ background: tk.surface, border: `1px solid ${tk.border}`, borderLeft: `3px solid ${PRIORITY_MAP[task.priority].color}`, boxShadow: tk.shadow, opacity: done ? 0.6 : 1 }}
+        onClick={() => onOpen(task)}>
+        <span className="text-sm flex-1 truncate" style={{ color: tk.text, textDecoration: done ? "line-through" : "none" }}>{task.title}</span>
+        <Pill color={STATUS_MAP[task.status].color} tk={tk}>{STATUS_MAP[task.status].label}</Pill>
+        <button onClick={(e) => { e.stopPropagation(); onAddChild(task.id); }} className="opacity-0 group-hover:opacity-100 shrink-0" title="Add sub-task">
+          <Plus size={13} style={{ color: tk.textFaint }} />
+        </button>
+        <div className="hidden md:block absolute left-0 top-full mt-1 z-20 w-56 p-2.5 rounded-lg text-xs opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity"
+          style={{ background: tk.surface, border: `1px solid ${tk.border}`, boxShadow: tk.shadow, color: tk.textMuted }}>
+          <div style={{ color: tk.text }} className="font-medium mb-1">{task.title}</div>
+          {task.description && <div className="mb-1">{task.description}</div>}
+          {task.dueDate && <div style={{ fontFamily: "IBM Plex Mono, monospace" }}>{fmtDate(task.dueDate)}</div>}
+        </div>
+      </div>
+      {children.length > 0 && (
+        <div className="ml-5 pl-4 mt-2" style={{ borderLeft: `2px solid ${tk.border}` }}>
+          {children.map((c) => <TreeNode key={c.id} task={c} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={onAddChild} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenameProject, onDeleteProject, onClose, orientation, setOrientation }) {
+  const [editing, setEditing] = useState(false);
+  const [nameValue, setNameValue] = useState(project.name);
+  const roots = tasks.filter((t) => t.projectId === project.id && !t.parentTaskId);
+
+  return (
+    <div className="rounded-2xl p-4" style={{ background: tk.surface, border: `1px solid ${tk.border}` }}>
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <IconBtn tk={tk} title="Back" onClick={onClose}><ChevronLeft size={16} /></IconBtn>
+          {editing ? (
+            <input value={nameValue} onChange={(e) => setNameValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { onRenameProject(project.id, nameValue.trim() || project.name); setEditing(false); } }}
+              onBlur={() => { onRenameProject(project.id, nameValue.trim() || project.name); setEditing(false); }}
+              autoFocus className="text-lg font-bold bg-transparent outline-none" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }} />
+          ) : (
+            <button onClick={() => setEditing(true)} className="flex items-center gap-1.5">
+              <span className="text-lg font-bold" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }}>{project.name}</span>
+              <Pencil size={13} style={{ color: tk.textFaint }} />
+            </button>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1 rounded-lg p-1" style={{ background: tk.surfaceAlt }}>
+            <button onClick={() => setOrientation("vertical")} className="text-xs px-2.5 py-1 rounded-lg font-medium" style={{ background: orientation === "vertical" ? accent : "transparent", color: orientation === "vertical" ? "#fff" : tk.textMuted }}>Vertical</button>
+            <button onClick={() => setOrientation("horizontal")} className="text-xs px-2.5 py-1 rounded-lg font-medium" style={{ background: orientation === "horizontal" ? accent : "transparent", color: orientation === "horizontal" ? "#fff" : tk.textMuted }}>Horizontal</button>
+          </div>
+          <button onClick={() => onAddTask(project.id, null)} className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg font-semibold text-white" style={{ background: accent }}>
+            <Plus size={13} /> Add task
+          </button>
+          <IconBtn tk={tk} title="Delete project" onClick={() => onDeleteProject(project.id)}><Trash2 size={16} style={{ color: "#FB7185" }} /></IconBtn>
+        </div>
+      </div>
+
+      {roots.length === 0 ? (
+        <div className="text-center py-14 rounded-xl" style={{ border: `1px dashed ${tk.border}`, color: tk.textFaint }}>
+          <div className="text-sm mb-3">No tasks in this project yet.</div>
+          <button onClick={() => onAddTask(project.id, null)} className="text-xs px-3 py-1.5 rounded-lg font-medium" style={{ background: tk.surfaceAlt, color: tk.text }}>
+            + Add the first task
+          </button>
+        </div>
+      ) : orientation === "horizontal" ? (
+        <div className="flex flex-wrap gap-4 items-start overflow-x-auto pb-2">
+          {roots.map((t) => (
+            <div key={t.id} className="min-w-[240px]">
+              <TreeNode task={t} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div>
+          {roots.map((t) => <TreeNode key={t.id} task={t} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
 /* Main App                                                                  */
 /* ---------------------------------------------------------------------- */
 
@@ -967,6 +1204,10 @@ export default function TaskManagerApp() {
   const [settings, setSettings] = useState({ accentColor: "#5B5BD6", bgImage: null });
   const [tasks, setTasks] = useState([]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [projects, setProjects] = useState([]);
+  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [orientation, setOrientation] = useState("vertical");
+  const [projectsOpen, setProjectsOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("dashboard");
   const [search, setSearch] = useState("");
@@ -988,21 +1229,23 @@ export default function TaskManagerApp() {
       const raw = localStorage.getItem("taskflow-state");
       if (raw) {
         const parsed = JSON.parse(raw);
-        setTasks(parsed.tasks?.length ? parsed.tasks : seedTasks());
-        setCategories(parsed.categories?.length ? parsed.categories : DEFAULT_CATEGORIES);
+        const rawTasks = parsed.tasks?.length ? parsed.tasks : seedTasks();
+        setTasks(rawTasks.map(normalizeTask));
+        setCategories(mergeCategories(parsed.categories, DEFAULT_CATEGORIES));
+        setProjects(parsed.projects || []);
         setTheme(parsed.theme || "light");
         setSettings(parsed.settings || { accentColor: "#5B5BD6", bgImage: null });
-      } else setTasks(seedTasks());
-    } catch { setTasks(seedTasks()); } finally { setLoaded(true); }
+      } else setTasks(seedTasks().map(normalizeTask));
+    } catch { setTasks(seedTasks().map(normalizeTask)); } finally { setLoaded(true); }
   }, []);
 
   useEffect(() => {
     if (!loaded) return;
     const t = setTimeout(() => {
-      try { localStorage.setItem("taskflow-state", JSON.stringify({ tasks, categories, theme, settings })); } catch { /* ignore */ }
+      try { localStorage.setItem("taskflow-state", JSON.stringify({ tasks, categories, projects, theme, settings })); } catch { /* ignore */ }
     }, 400);
     return () => clearTimeout(t);
-  }, [tasks, categories, theme, settings, loaded]);
+  }, [tasks, categories, projects, theme, settings, loaded]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 1800); };
   const allTags = useMemo(() => [...new Set(tasks.flatMap((t) => t.tags))], [tasks]);
@@ -1030,6 +1273,7 @@ export default function TaskManagerApp() {
 
   const stats = useMemo(() => ({
     todo: tasks.filter((t) => t.status === "todo").length,
+    waiting: tasks.filter((t) => t.status === "waiting").length,
     inprogress: tasks.filter((t) => t.status === "inprogress").length,
     done: tasks.filter((t) => t.status === "done").length,
     overdue: tasks.filter((t) => isOverdue(t)).length,
@@ -1075,6 +1319,18 @@ export default function TaskManagerApp() {
   };
   const moveTask = (id, status) => setTasks((prev) => prev.map((t) => t.id === id ? { ...t, status, completedAt: status === "done" ? new Date().toISOString() : null } : t));
   const addTime = (taskId, minutes) => { setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, timeSpent: (t.timeSpent || 0) + minutes } : t)); showToast(`+${minutes} min logged`); };
+  const rescheduleTask = (id, newIso) => setTasks((prev) => prev.map((t) => t.id === id ? { ...t, dueDate: newIso } : t));
+
+  const createProject = (name) => { const p = { id: uid(), name, createdAt: new Date().toISOString() }; setProjects((prev) => [...prev, p]); showToast("Project created"); };
+  const renameProject = (id, name) => setProjects((prev) => prev.map((p) => p.id === id ? { ...p, name } : p));
+  const deleteProject = (id) => {
+    setProjects((prev) => prev.filter((p) => p.id !== id));
+    setTasks((prev) => prev.map((t) => t.projectId === id ? { ...t, projectId: null, parentTaskId: null } : t));
+    if (activeProjectId === id) { setActiveProjectId(null); setView("dashboard"); }
+    showToast("Project deleted");
+  };
+  const addTaskInProject = (projectId, parentTaskId) => openNew({ projectId, parentTaskId });
+  const openProject = (id) => { setActiveProjectId(id); setView("project"); setProjectsOpen(false); };
 
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify({ tasks, categories }, null, 2)], { type: "application/json" });
@@ -1143,7 +1399,8 @@ export default function TaskManagerApp() {
           </div>
 
           <div className="ml-auto flex items-center gap-1">
-            {view !== "dashboard" && (
+            <IconBtn tk={tk} title="Projects" onClick={() => setProjectsOpen(true)} active={projectsOpen || view === "project"}><Layers size={16} /></IconBtn>
+            {view !== "dashboard" && view !== "project" && (
               <IconBtn tk={tk} title="Filters" onClick={() => setFiltersOpen(true)} active={!!(filters.status || filters.priority || filters.category || filters.tag)}>
                 <Filter size={16} />
               </IconBtn>
@@ -1186,6 +1443,7 @@ export default function TaskManagerApp() {
           <div className="space-y-5">
             <div className="flex flex-wrap gap-3">
               <StatCard label="To do" value={stats.todo} color="#9CA3AF" icon={<Circle size={16} />} tk={tk} />
+              <StatCard label="Waiting" value={stats.waiting} color="#A78BFA" icon={<Timer size={16} />} tk={tk} />
               <StatCard label="In progress" value={stats.inprogress} color={accent} icon={<Clock size={16} />} tk={tk} />
               <StatCard label="Completed" value={stats.done} color="#2DD4BF" icon={<CheckCircle2 size={16} />} tk={tk} />
               <StatCard label="Overdue" value={stats.overdue} color="#FB7185" icon={<AlertTriangle size={16} />} tk={tk} />
@@ -1205,11 +1463,18 @@ export default function TaskManagerApp() {
         {view === "list" && <ListView tasks={filtered} tk={tk} onOpen={openEdit} categories={categories} sortKey={sortKey} setSortKey={setSortKey} />}
         {view === "calendar" && (
           <CalendarView tasks={filtered} tk={tk} onOpen={openEdit} focusDate={calFocus} setFocusDate={setCalFocus} mode={calMode} setMode={setCalMode}
-            onCreateOnDate={(d) => openNew({ dueDate: d.toISOString() })} accent={accent} />
+            onCreateOnDate={(d) => openNew({ dueDate: d.toISOString() })} onReschedule={rescheduleTask} accent={accent} />
+        )}
+        {view === "project" && activeProjectId && projects.some((p) => p.id === activeProjectId) && (
+          <ProjectView project={projects.find((p) => p.id === activeProjectId)} tasks={tasks} tk={tk} accent={accent}
+            onOpen={openEdit} onAddTask={addTaskInProject} onRenameProject={renameProject} onDeleteProject={deleteProject}
+            onClose={() => setView("dashboard")} orientation={orientation} setOrientation={setOrientation} />
         )}
       </div>
 
       <FilterSidebar tk={tk} open={filtersOpen} onClose={() => setFiltersOpen(false)} filters={filters} setFilters={setFilters} categories={categories} allTags={allTags} accent={accent} />
+      <ProjectsSidebar tk={tk} open={projectsOpen} onClose={() => setProjectsOpen(false)} projects={projects} tasks={tasks}
+        onSelect={openProject} onCreate={createProject} onRename={renameProject} onDelete={deleteProject} accent={accent} />
 
       {modalTask && (
         <TaskModal task={modalTask} tk={tk} categories={categories} allTasks={tasks} onClose={() => setModalTask(null)} onSave={saveTask} onDelete={deleteTask} onDuplicate={duplicateTask} accent={accent} />
