@@ -6,7 +6,7 @@ import {
   Paperclip, Repeat, ChevronLeft, ChevronRight, GripVertical, Check,
   Download, Upload, Timer, Play, Pause, RotateCcw, ChevronDown,
   ArrowUp, ArrowDown, Link2, Palette, Image as ImageIcon,
-  Layers, Pencil, Mail
+  Layers, Pencil, Mail, Flag, CornerDownRight
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- */
@@ -111,6 +111,14 @@ function normalizeTask(t) {
     notesImages: [], attachments: [], tags: [], subtasks: [],
     ...t,
   };
+}
+function isDescendantOf(tasks, ancestorId, taskId) {
+  let current = tasks.find((t) => t.id === taskId);
+  while (current && current.parentTaskId) {
+    if (current.parentTaskId === ancestorId) return true;
+    current = tasks.find((t) => t.id === current.parentTaskId);
+  }
+  return false;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -995,6 +1003,31 @@ function FilterSidebar({ tk, open, onClose, filters, setFilters, categories, all
       </div>
     </div>
   );
+  const MultiSection = ({ title, options, values, onToggle, onClearSection }) => (
+    <div className="mb-5">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: tk.textFaint }}>{title} <span style={{ color: tk.textFaint, fontWeight: 400 }}>(pick several)</span></div>
+        {values.length > 0 && <button onClick={onClearSection} className="text-[11px]" style={{ color: accent }}>Clear</button>}
+      </div>
+      <div className="space-y-1">
+        {options.map((o) => {
+          const key = o.key || o.name || o;
+          const checked = values.includes(key);
+          return (
+            <button key={key} onClick={() => onToggle(key)} className="w-full text-left text-sm px-2.5 py-1.5 rounded-lg flex items-center gap-2"
+              style={{ background: checked ? tk.surfaceAlt : "transparent", color: checked ? tk.text : tk.textMuted, fontWeight: checked ? 600 : 400 }}>
+              <span className="w-4 h-4 rounded flex items-center justify-center shrink-0" style={{ border: `1.5px solid ${checked ? accent : tk.border}`, background: checked ? accent : "transparent" }}>
+                {checked && <Check size={11} color="#fff" />}
+              </span>
+              {o.color && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: o.color }} />}
+              <span className="truncate">{o.label || o.name || o}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+  const toggleCategory = (name) => setFilters((f) => ({ ...f, categories: f.categories.includes(name) ? f.categories.filter((c) => c !== name) : [...f.categories, name] }));
   return (
     <div className="fixed inset-0 z-[140] flex" onClick={onClose}>
       <div style={{ background: "rgba(0,0,0,0.35)" }} className="flex-1" />
@@ -1005,9 +1038,9 @@ function FilterSidebar({ tk, open, onClose, filters, setFilters, categories, all
         </div>
         <Section title="Status" options={STATUSES} value={filters.status} onPick={(v) => setFilters((f) => ({ ...f, status: v }))} />
         <Section title="Priority" options={PRIORITIES} value={filters.priority} onPick={(v) => setFilters((f) => ({ ...f, priority: v }))} />
-        <Section title="Category" options={categories} value={filters.category} onPick={(v) => setFilters((f) => ({ ...f, category: v }))} />
+        <MultiSection title="Category" options={categories} values={filters.categories} onToggle={toggleCategory} onClearSection={() => setFilters((f) => ({ ...f, categories: [] }))} />
         <Section title="Tag" options={allTags.map((t) => ({ key: t, label: `#${t}` }))} value={filters.tag} onPick={(v) => setFilters((f) => ({ ...f, tag: v }))} />
-        <button onClick={() => setFilters({ status: "", priority: "", category: "", tag: "" })} className="w-full mt-2 py-2 rounded-lg text-xs font-medium" style={{ background: `${accent}1A`, color: accent }}>
+        <button onClick={() => setFilters({ status: "", priority: "", categories: [], tag: "" })} className="w-full mt-2 py-2 rounded-lg text-xs font-medium" style={{ background: `${accent}1A`, color: accent }}>
           Clear all filters
         </button>
       </div>
@@ -1108,18 +1141,46 @@ function ProjectsSidebar({ tk, open, onClose, projects, tasks, onSelect, onCreat
 /* Project tree                                                            */
 /* ---------------------------------------------------------------------- */
 
-function TreeNode({ task, tasks, tk, onOpen, onAddChild }) {
+function TreeNode({ task, tasks, tk, accent, onOpen, onAddChild, onDelete, onReparent, isRoot }) {
+  const [dragOver, setDragOver] = useState(false);
   const children = tasks.filter((t) => t.parentTaskId === task.id);
   const done = task.status === "done";
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const draggedId = e.dataTransfer.getData("text/plain");
+    if (!draggedId || draggedId === task.id) return;
+    if (isDescendantOf(tasks, draggedId, task.id)) return;
+    onReparent(draggedId, task.id);
+  };
+
   return (
     <div className="mb-2">
-      <div className="group relative flex items-center gap-2 rounded-lg px-3 py-2 cursor-pointer transition-shadow"
-        style={{ background: tk.surface, border: `1px solid ${tk.border}`, borderLeft: `3px solid ${PRIORITY_MAP[task.priority].color}`, boxShadow: tk.shadow, opacity: done ? 0.6 : 1 }}
+      <div className="group relative flex items-center gap-2 rounded-lg cursor-pointer transition-shadow"
+        draggable
+        onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData("text/plain", task.id); }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        style={{
+          background: dragOver ? `${accent}1A` : isRoot ? tk.surfaceAlt : tk.surface,
+          border: `1px solid ${dragOver ? accent : tk.border}`,
+          borderLeft: `${isRoot ? 4 : 3}px solid ${PRIORITY_MAP[task.priority].color}`,
+          boxShadow: isRoot ? tk.shadow : "none",
+          padding: isRoot ? "10px 14px" : "6px 12px",
+          opacity: done ? 0.6 : 1,
+        }}
         onClick={() => onOpen(task)}>
-        <span className="text-sm flex-1 truncate" style={{ color: tk.text, textDecoration: done ? "line-through" : "none" }}>{task.title}</span>
+        {isRoot ? <Flag size={13} style={{ color: accent }} className="shrink-0" /> : <CornerDownRight size={12} style={{ color: tk.textFaint }} className="shrink-0" />}
+        <span className={isRoot ? "text-[15px] font-semibold flex-1 truncate" : "text-sm flex-1 truncate"} style={{ color: tk.text, textDecoration: done ? "line-through" : "none" }}>{task.title}</span>
         <Pill color={STATUS_MAP[task.status].color} tk={tk}>{STATUS_MAP[task.status].label}</Pill>
         <button onClick={(e) => { e.stopPropagation(); onAddChild(task.id); }} className="opacity-0 group-hover:opacity-100 shrink-0" title="Add sub-task">
           <Plus size={13} style={{ color: tk.textFaint }} />
+        </button>
+        <button onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} className="opacity-0 group-hover:opacity-100 shrink-0" title="Remove from project">
+          <Trash2 size={13} style={{ color: "#FB7185" }} />
         </button>
         <div className="hidden md:block absolute left-0 top-full mt-1 z-20 w-56 p-2.5 rounded-lg text-xs opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity"
           style={{ background: tk.surface, border: `1px solid ${tk.border}`, boxShadow: tk.shadow, color: tk.textMuted }}>
@@ -1130,17 +1191,46 @@ function TreeNode({ task, tasks, tk, onOpen, onAddChild }) {
       </div>
       {children.length > 0 && (
         <div className="ml-5 pl-4 mt-2" style={{ borderLeft: `2px solid ${tk.border}` }}>
-          {children.map((c) => <TreeNode key={c.id} task={c} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={onAddChild} />)}
+          {children.map((c) => <TreeNode key={c.id} task={c} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={onAddChild} onDelete={onDelete} onReparent={onReparent} isRoot={false} />)}
         </div>
       )}
     </div>
   );
 }
 
-function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenameProject, onDeleteProject, onClose, orientation, setOrientation }) {
+function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenameProject, onDeleteProject, onDeleteTask, onReparentTask, onClose, orientation, setOrientation }) {
   const [editing, setEditing] = useState(false);
   const [nameValue, setNameValue] = useState(project.name);
+  const [scale, setScale] = useState(1);
+  const [rootDragOver, setRootDragOver] = useState(false);
+  const outerRef = useRef(null);
+  const innerRef = useRef(null);
   const roots = tasks.filter((t) => t.projectId === project.id && !t.parentTaskId);
+
+  useEffect(() => {
+    if (orientation !== "horizontal") { setScale(1); return; }
+    const recompute = () => {
+      if (!outerRef.current || !innerRef.current) return;
+      const outerW = outerRef.current.clientWidth;
+      const innerW = innerRef.current.scrollWidth;
+      setScale(innerW > outerW && innerW > 0 ? Math.max(0.5, outerW / innerW) : 1);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (outerRef.current) ro.observe(outerRef.current);
+    window.addEventListener("resize", recompute);
+    return () => { ro.disconnect(); window.removeEventListener("resize", recompute); };
+  }, [orientation, roots.length, tasks]);
+
+  const naturalHeight = innerRef.current?.offsetHeight;
+
+  const handleRootDrop = (e) => {
+    e.preventDefault();
+    setRootDragOver(false);
+    const draggedId = e.dataTransfer.getData("text/plain");
+    if (!draggedId) return;
+    onReparentTask(draggedId, null);
+  };
 
   return (
     <div className="rounded-2xl p-4" style={{ background: tk.surface, border: `1px solid ${tk.border}` }}>
@@ -1179,18 +1269,23 @@ function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenamePr
           </button>
         </div>
       ) : orientation === "horizontal" ? (
-        <div className="flex flex-wrap gap-4 items-start overflow-x-auto pb-2">
-          {roots.map((t) => (
-            <div key={t.id} className="min-w-[240px]">
-              <TreeNode task={t} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} />
-            </div>
-          ))}
+        <div ref={outerRef} style={{ overflow: "hidden", height: scale < 1 && naturalHeight ? naturalHeight * scale : "auto" }}
+          onDragOver={(e) => { e.preventDefault(); setRootDragOver(true); }} onDragLeave={() => setRootDragOver(false)} onDrop={handleRootDrop}>
+          <div ref={innerRef} className="flex gap-4 items-start" style={{ transform: `scale(${scale})`, transformOrigin: "top left", width: scale < 1 ? `${100 / scale}%` : "auto" }}>
+            {roots.map((t) => (
+              <div key={t.id} style={{ minWidth: 220, flex: "0 0 auto" }}>
+                <TreeNode task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} isRoot />
+              </div>
+            ))}
+          </div>
         </div>
       ) : (
-        <div>
-          {roots.map((t) => <TreeNode key={t.id} task={t} tasks={tasks} tk={tk} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} />)}
+        <div onDragOver={(e) => { e.preventDefault(); setRootDragOver(true); }} onDragLeave={() => setRootDragOver(false)} onDrop={handleRootDrop}
+          style={{ background: rootDragOver ? `${accent}0D` : "transparent", borderRadius: 8 }}>
+          {roots.map((t) => <TreeNode key={t.id} task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} isRoot />)}
         </div>
       )}
+      <div className="text-[11px] mt-3" style={{ color: tk.textFaint }}>Tip: drag a task card onto another to make it a sub-task, or drop it on empty space to make it top-level.</div>
     </div>
   );
 }
@@ -1211,7 +1306,7 @@ export default function TaskManagerApp() {
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("dashboard");
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState({ status: "", priority: "", category: "", tag: "" });
+  const [filters, setFilters] = useState({ status: "", priority: "", categories: [], tag: "" });
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [modalTask, setModalTask] = useState(null);
   const [toast, setToast] = useState(null);
@@ -1256,7 +1351,7 @@ export default function TaskManagerApp() {
       if (search && !`${t.title} ${t.description}`.toLowerCase().includes(search.toLowerCase())) return false;
       if (filters.status && t.status !== filters.status) return false;
       if (filters.priority && t.priority !== filters.priority) return false;
-      if (filters.category && t.category !== filters.category) return false;
+      if (filters.categories.length > 0 && !filters.categories.includes(t.category)) return false;
       if (filters.tag && !t.tags.includes(filters.tag)) return false;
       return true;
     });
@@ -1331,6 +1426,15 @@ export default function TaskManagerApp() {
   };
   const addTaskInProject = (projectId, parentTaskId) => openNew({ projectId, parentTaskId });
   const openProject = (id) => { setActiveProjectId(id); setView("project"); setProjectsOpen(false); };
+  const reparentTask = (id, newParentId) => setTasks((prev) => prev.map((t) => t.id === id ? { ...t, parentTaskId: newParentId } : t));
+  const deleteProjectTask = (id) => {
+    setTasks((prev) => {
+      const target = prev.find((t) => t.id === id);
+      if (!target) return prev;
+      return prev.filter((t) => t.id !== id).map((t) => t.parentTaskId === id ? { ...t, parentTaskId: target.parentTaskId } : t);
+    });
+    showToast("Task removed");
+  };
 
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify({ tasks, categories }, null, 2)], { type: "application/json" });
@@ -1401,7 +1505,7 @@ export default function TaskManagerApp() {
           <div className="ml-auto flex items-center gap-1">
             <IconBtn tk={tk} title="Projects" onClick={() => setProjectsOpen(true)} active={projectsOpen || view === "project"}><Layers size={16} /></IconBtn>
             {view !== "dashboard" && view !== "project" && (
-              <IconBtn tk={tk} title="Filters" onClick={() => setFiltersOpen(true)} active={!!(filters.status || filters.priority || filters.category || filters.tag)}>
+              <IconBtn tk={tk} title="Filters" onClick={() => setFiltersOpen(true)} active={!!(filters.status || filters.priority || filters.categories.length > 0 || filters.tag)}>
                 <Filter size={16} />
               </IconBtn>
             )}
@@ -1438,7 +1542,7 @@ export default function TaskManagerApp() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 md:px-6 py-5">
+      <div className={`mx-auto px-4 md:px-6 py-5 ${view === "project" ? "max-w-[1600px]" : "max-w-6xl"}`}>
         {view === "dashboard" && (
           <div className="space-y-5">
             <div className="flex flex-wrap gap-3">
@@ -1468,6 +1572,7 @@ export default function TaskManagerApp() {
         {view === "project" && activeProjectId && projects.some((p) => p.id === activeProjectId) && (
           <ProjectView project={projects.find((p) => p.id === activeProjectId)} tasks={tasks} tk={tk} accent={accent}
             onOpen={openEdit} onAddTask={addTaskInProject} onRenameProject={renameProject} onDeleteProject={deleteProject}
+            onDeleteTask={deleteProjectTask} onReparentTask={reparentTask}
             onClose={() => setView("dashboard")} orientation={orientation} setOrientation={setOrientation} />
         )}
       </div>
