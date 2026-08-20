@@ -109,6 +109,7 @@ function normalizeTask(t) {
   return {
     emailLink: "", endTime: null, projectId: null, parentTaskId: null,
     notesImages: [], attachments: [], tags: [], subtasks: [],
+    order: t.createdAt ? Date.parse(t.createdAt) : Date.now(),
     ...t,
   };
 }
@@ -119,6 +120,10 @@ function isDescendantOf(tasks, ancestorId, taskId) {
     current = tasks.find((t) => t.id === current.parentTaskId);
   }
   return false;
+}
+function getDescendants(tasks, id) {
+  const direct = tasks.filter((t) => t.parentTaskId === id);
+  return direct.reduce((acc, t) => [...acc, t, ...getDescendants(tasks, t.id)], []);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -720,12 +725,12 @@ function Pomodoro({ tk, tasks, onAddTime, accent }) {
 const emptyTask = (defaults = {}) => ({
   id: uid(), title: "", description: "", priority: "medium", status: "todo",
   dueDate: null, endTime: null, category: "", tags: [], assignee: "", recurring: null, dependsOn: null,
-  emailLink: "", projectId: null, parentTaskId: null,
+  emailLink: "", projectId: null, parentTaskId: null, order: Date.now(),
   subtasks: [], notes: "", notesImages: [], attachments: [], timeSpent: 0,
   createdAt: new Date().toISOString(), completedAt: null, ...defaults,
 });
 
-function TaskModal({ task, tk, categories, allTasks, onClose, onSave, onDelete, onDuplicate, accent }) {
+function TaskModal({ task, tk, categories, allTasks, projects, onClose, onSave, onDelete, onDuplicate, accent }) {
   const [form, setForm] = useState(task);
   const [tagInput, setTagInput] = useState("");
   const [subInput, setSubInput] = useState("");
@@ -782,6 +787,12 @@ function TaskModal({ task, tk, categories, allTasks, onClose, onSave, onDelete, 
   const inputStyle = { background: tk.surfaceAlt, color: tk.text, border: `1px solid ${tk.border}` };
   const labelCls = "text-xs font-medium mb-1.5 block";
   const otherTasks = allTasks.filter((t) => t.id !== form.id);
+  const descendants = getDescendants(allTasks, task.id);
+  const completionPct = descendants.length > 0 ? Math.round((descendants.filter((d) => d.status === "done").length / descendants.length) * 100) : null;
+  const projectList = projects || [];
+  const parentOptions = form.projectId
+    ? allTasks.filter((t) => t.projectId === form.projectId && t.id !== form.id && !isDescendantOf(allTasks, form.id, t.id))
+    : [];
 
   return (
     <div className="fixed inset-0 z-[150] flex items-start md:items-center justify-center p-0 md:p-4" style={{ background: "rgba(0,0,0,0.45)" }} onClick={onClose}>
@@ -798,8 +809,15 @@ function TaskModal({ task, tk, categories, allTasks, onClose, onSave, onDelete, 
         </div>
 
         <div className="p-5 space-y-4">
-          <input value={form.title} onChange={(e) => update({ title: e.target.value })} placeholder="Task title"
-            className="w-full text-lg font-semibold outline-none bg-transparent" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }} autoFocus />
+          <div className="flex items-center gap-2">
+            <input value={form.title} onChange={(e) => update({ title: e.target.value })} placeholder="Task title"
+              className="flex-1 text-lg font-semibold outline-none bg-transparent" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }} autoFocus />
+            {completionPct !== null && (
+              <span className="text-xs font-semibold px-2 py-1 rounded-full shrink-0" style={{ background: completionPct === 100 ? "#2DD4BF1A" : `${accent}1A`, color: completionPct === 100 ? "#2DD4BF" : accent }}>
+                {completionPct}% done
+              </span>
+            )}
+          </div>
 
           <textarea value={form.description} onChange={(e) => update({ description: e.target.value })} placeholder="Description"
             rows={2} className="w-full text-sm outline-none rounded-lg px-3 py-2 resize-none" style={inputStyle} />
@@ -874,6 +892,21 @@ function TaskModal({ task, tk, categories, allTasks, onClose, onSave, onDelete, 
                 className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle}>
                 <option value="">Not recurring</option>
                 {RECUR_OPTIONS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: tk.textMuted }}><Layers size={12} className="inline mr-1" />Pipeline placement</label>
+            <div className="grid grid-cols-2 gap-3">
+              <select value={form.projectId || ""} onChange={(e) => update({ projectId: e.target.value || null, parentTaskId: null })} className="w-full text-sm rounded-lg px-3 py-1.5 outline-none" style={inputStyle}>
+                <option value="">No project</option>
+                {projectList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <select value={form.parentTaskId || ""} onChange={(e) => update({ parentTaskId: e.target.value || null })} disabled={!form.projectId}
+                className="w-full text-sm rounded-lg px-3 py-1.5 outline-none disabled:opacity-40" style={inputStyle}>
+                <option value="">Top level (no parent)</option>
+                {parentOptions.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
               </select>
             </div>
           </div>
@@ -1028,6 +1061,8 @@ function FilterSidebar({ tk, open, onClose, filters, setFilters, categories, all
     </div>
   );
   const toggleCategory = (name) => setFilters((f) => ({ ...f, categories: f.categories.includes(name) ? f.categories.filter((c) => c !== name) : [...f.categories, name] }));
+  const toggleStatus = (key) => setFilters((f) => ({ ...f, statuses: f.statuses.includes(key) ? f.statuses.filter((c) => c !== key) : [...f.statuses, key] }));
+  const togglePriority = (key) => setFilters((f) => ({ ...f, priorities: f.priorities.includes(key) ? f.priorities.filter((c) => c !== key) : [...f.priorities, key] }));
   return (
     <div className="fixed inset-0 z-[140] flex" onClick={onClose}>
       <div style={{ background: "rgba(0,0,0,0.35)" }} className="flex-1" />
@@ -1036,11 +1071,11 @@ function FilterSidebar({ tk, open, onClose, filters, setFilters, categories, all
           <span className="text-sm font-semibold" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }}>Filters</span>
           <IconBtn tk={tk} title="Close" onClick={onClose}><X size={16} /></IconBtn>
         </div>
-        <Section title="Status" options={STATUSES} value={filters.status} onPick={(v) => setFilters((f) => ({ ...f, status: v }))} />
-        <Section title="Priority" options={PRIORITIES} value={filters.priority} onPick={(v) => setFilters((f) => ({ ...f, priority: v }))} />
+        <MultiSection title="Status" options={STATUSES} values={filters.statuses} onToggle={toggleStatus} onClearSection={() => setFilters((f) => ({ ...f, statuses: [] }))} />
+        <MultiSection title="Priority" options={PRIORITIES} values={filters.priorities} onToggle={togglePriority} onClearSection={() => setFilters((f) => ({ ...f, priorities: [] }))} />
         <MultiSection title="Category" options={categories} values={filters.categories} onToggle={toggleCategory} onClearSection={() => setFilters((f) => ({ ...f, categories: [] }))} />
         <Section title="Tag" options={allTags.map((t) => ({ key: t, label: `#${t}` }))} value={filters.tag} onPick={(v) => setFilters((f) => ({ ...f, tag: v }))} />
-        <button onClick={() => setFilters({ status: "", priority: "", categories: [], tag: "" })} className="w-full mt-2 py-2 rounded-lg text-xs font-medium" style={{ background: `${accent}1A`, color: accent }}>
+        <button onClick={() => setFilters({ statuses: [], priorities: [], categories: [], tag: "" })} className="w-full mt-2 py-2 rounded-lg text-xs font-medium" style={{ background: `${accent}1A`, color: accent }}>
           Clear all filters
         </button>
       </div>
@@ -1141,10 +1176,12 @@ function ProjectsSidebar({ tk, open, onClose, projects, tasks, onSelect, onCreat
 /* Project tree                                                            */
 /* ---------------------------------------------------------------------- */
 
-function TreeNode({ task, tasks, tk, accent, onOpen, onAddChild, onDelete, onReparent, isRoot }) {
+function TreeNode({ task, tasks, tk, accent, onOpen, onAddChild, onDelete, onReparent, onMove, isRoot, isFirst, isLast }) {
   const [dragOver, setDragOver] = useState(false);
-  const children = tasks.filter((t) => t.parentTaskId === task.id);
+  const children = tasks.filter((t) => t.parentTaskId === task.id).sort((a, b) => (a.order || 0) - (b.order || 0));
   const done = task.status === "done";
+  const descendants = getDescendants(tasks, task.id);
+  const pct = descendants.length > 0 ? Math.round((descendants.filter((d) => d.status === "done").length / descendants.length) * 100) : null;
 
   const handleDrop = (e) => {
     e.preventDefault();
@@ -1173,9 +1210,17 @@ function TreeNode({ task, tasks, tk, accent, onOpen, onAddChild, onDelete, onRep
           opacity: done ? 0.6 : 1,
         }}
         onClick={() => onOpen(task)}>
+        <GripVertical size={13} style={{ color: tk.textFaint }} className="opacity-0 group-hover:opacity-100 shrink-0 cursor-grab" />
         {isRoot ? <Flag size={13} style={{ color: accent }} className="shrink-0" /> : <CornerDownRight size={12} style={{ color: tk.textFaint }} className="shrink-0" />}
         <span className={isRoot ? "text-[15px] font-semibold flex-1 truncate" : "text-sm flex-1 truncate"} style={{ color: tk.text, textDecoration: done ? "line-through" : "none" }}>{task.title}</span>
+        {pct !== null && <span className="text-[11px] font-semibold shrink-0" style={{ color: pct === 100 ? "#2DD4BF" : tk.textFaint }}>{pct}%</span>}
         <Pill color={STATUS_MAP[task.status].color} tk={tk}>{STATUS_MAP[task.status].label}</Pill>
+        <button onClick={(e) => { e.stopPropagation(); onMove(task.id, -1); }} disabled={isFirst} className="opacity-0 group-hover:opacity-100 shrink-0 disabled:opacity-0" title="Move up">
+          <ArrowUp size={13} style={{ color: tk.textFaint }} />
+        </button>
+        <button onClick={(e) => { e.stopPropagation(); onMove(task.id, 1); }} disabled={isLast} className="opacity-0 group-hover:opacity-100 shrink-0 disabled:opacity-0" title="Move down">
+          <ArrowDown size={13} style={{ color: tk.textFaint }} />
+        </button>
         <button onClick={(e) => { e.stopPropagation(); onAddChild(task.id); }} className="opacity-0 group-hover:opacity-100 shrink-0" title="Add sub-task">
           <Plus size={13} style={{ color: tk.textFaint }} />
         </button>
@@ -1191,21 +1236,23 @@ function TreeNode({ task, tasks, tk, accent, onOpen, onAddChild, onDelete, onRep
       </div>
       {children.length > 0 && (
         <div className="ml-5 pl-4 mt-2" style={{ borderLeft: `2px solid ${tk.border}` }}>
-          {children.map((c) => <TreeNode key={c.id} task={c} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={onAddChild} onDelete={onDelete} onReparent={onReparent} isRoot={false} />)}
+          {children.map((c, i) => <TreeNode key={c.id} task={c} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={onAddChild} onDelete={onDelete} onReparent={onReparent} onMove={onMove} isRoot={false} isFirst={i === 0} isLast={i === children.length - 1} />)}
         </div>
       )}
     </div>
   );
 }
 
-function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenameProject, onDeleteProject, onDeleteTask, onReparentTask, onClose, orientation, setOrientation }) {
+function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenameProject, onDeleteProject, onDeleteTask, onReparentTask, onMoveTask, onClose, orientation, setOrientation }) {
   const [editing, setEditing] = useState(false);
   const [nameValue, setNameValue] = useState(project.name);
   const [scale, setScale] = useState(1);
   const [rootDragOver, setRootDragOver] = useState(false);
   const outerRef = useRef(null);
   const innerRef = useRef(null);
-  const roots = tasks.filter((t) => t.projectId === project.id && !t.parentTaskId);
+  const roots = tasks.filter((t) => t.projectId === project.id && !t.parentTaskId).sort((a, b) => (a.order || 0) - (b.order || 0));
+  const allProjectTasks = tasks.filter((t) => t.projectId === project.id);
+  const projectPct = allProjectTasks.length > 0 ? Math.round((allProjectTasks.filter((t) => t.status === "done").length / allProjectTasks.length) * 100) : null;
 
   useEffect(() => {
     if (orientation !== "horizontal") { setScale(1); return; }
@@ -1235,7 +1282,7 @@ function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenamePr
   return (
     <div className="rounded-2xl p-4" style={{ background: tk.surface, border: `1px solid ${tk.border}` }}>
       <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <IconBtn tk={tk} title="Back" onClick={onClose}><ChevronLeft size={16} /></IconBtn>
           {editing ? (
             <input value={nameValue} onChange={(e) => setNameValue(e.target.value)}
@@ -1247,6 +1294,11 @@ function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenamePr
               <span className="text-lg font-bold" style={{ color: tk.text, fontFamily: "Sora, sans-serif" }}>{project.name}</span>
               <Pencil size={13} style={{ color: tk.textFaint }} />
             </button>
+          )}
+          {projectPct !== null && (
+            <span className="text-xs font-semibold px-2 py-1 rounded-full" style={{ background: projectPct === 100 ? "#2DD4BF1A" : `${accent}1A`, color: projectPct === 100 ? "#2DD4BF" : accent }}>
+              {projectPct}% complete
+            </span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -1272,9 +1324,9 @@ function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenamePr
         <div ref={outerRef} style={{ overflow: "hidden", height: scale < 1 && naturalHeight ? naturalHeight * scale : "auto" }}
           onDragOver={(e) => { e.preventDefault(); setRootDragOver(true); }} onDragLeave={() => setRootDragOver(false)} onDrop={handleRootDrop}>
           <div ref={innerRef} className="flex gap-4 items-start" style={{ transform: `scale(${scale})`, transformOrigin: "top left", width: scale < 1 ? `${100 / scale}%` : "auto" }}>
-            {roots.map((t) => (
+            {roots.map((t, i) => (
               <div key={t.id} style={{ minWidth: 220, flex: "0 0 auto" }}>
-                <TreeNode task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} isRoot />
+                <TreeNode task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} onMove={onMoveTask} isRoot isFirst={i === 0} isLast={i === roots.length - 1} />
               </div>
             ))}
           </div>
@@ -1282,7 +1334,7 @@ function ProjectView({ project, tasks, tk, accent, onOpen, onAddTask, onRenamePr
       ) : (
         <div onDragOver={(e) => { e.preventDefault(); setRootDragOver(true); }} onDragLeave={() => setRootDragOver(false)} onDrop={handleRootDrop}
           style={{ background: rootDragOver ? `${accent}0D` : "transparent", borderRadius: 8 }}>
-          {roots.map((t) => <TreeNode key={t.id} task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} isRoot />)}
+          {roots.map((t, i) => <TreeNode key={t.id} task={t} tasks={tasks} tk={tk} accent={accent} onOpen={onOpen} onAddChild={(pid) => onAddTask(project.id, pid)} onDelete={onDeleteTask} onReparent={onReparentTask} onMove={onMoveTask} isRoot isFirst={i === 0} isLast={i === roots.length - 1} />)}
         </div>
       )}
       <div className="text-[11px] mt-3" style={{ color: tk.textFaint }}>Tip: drag a task card onto another to make it a sub-task, or drop it on empty space to make it top-level.</div>
@@ -1301,12 +1353,12 @@ export default function TaskManagerApp() {
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [projects, setProjects] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState(null);
-  const [orientation, setOrientation] = useState("vertical");
+  const [orientation, setOrientation] = useState("horizontal");
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("dashboard");
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState({ status: "", priority: "", categories: [], tag: "" });
+  const [filters, setFilters] = useState({ statuses: [], priorities: [], categories: [], tag: "" });
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [modalTask, setModalTask] = useState(null);
   const [toast, setToast] = useState(null);
@@ -1349,8 +1401,8 @@ export default function TaskManagerApp() {
   const filtered = useMemo(() => {
     let list = tasks.filter((t) => {
       if (search && !`${t.title} ${t.description}`.toLowerCase().includes(search.toLowerCase())) return false;
-      if (filters.status && t.status !== filters.status) return false;
-      if (filters.priority && t.priority !== filters.priority) return false;
+      if (filters.statuses.length > 0 && !filters.statuses.includes(t.status)) return false;
+      if (filters.priorities.length > 0 && !filters.priorities.includes(t.priority)) return false;
       if (filters.categories.length > 0 && !filters.categories.includes(t.category)) return false;
       if (filters.tag && !t.tags.includes(filters.tag)) return false;
       return true;
@@ -1427,6 +1479,18 @@ export default function TaskManagerApp() {
   const addTaskInProject = (projectId, parentTaskId) => openNew({ projectId, parentTaskId });
   const openProject = (id) => { setActiveProjectId(id); setView("project"); setProjectsOpen(false); };
   const reparentTask = (id, newParentId) => setTasks((prev) => prev.map((t) => t.id === id ? { ...t, parentTaskId: newParentId } : t));
+  const moveSiblingTask = (id, dir) => {
+    setTasks((prev) => {
+      const task = prev.find((t) => t.id === id);
+      if (!task) return prev;
+      const siblings = prev.filter((t) => t.parentTaskId === task.parentTaskId && t.projectId === task.projectId).sort((a, b) => (a.order || 0) - (b.order || 0));
+      const idx = siblings.findIndex((t) => t.id === id);
+      const swapIdx = idx + dir;
+      if (swapIdx < 0 || swapIdx >= siblings.length) return prev;
+      const other = siblings[swapIdx];
+      return prev.map((t) => t.id === task.id ? { ...t, order: other.order } : t.id === other.id ? { ...t, order: task.order } : t);
+    });
+  };
   const deleteProjectTask = (id) => {
     setTasks((prev) => {
       const target = prev.find((t) => t.id === id);
@@ -1505,7 +1569,7 @@ export default function TaskManagerApp() {
           <div className="ml-auto flex items-center gap-1">
             <IconBtn tk={tk} title="Projects" onClick={() => setProjectsOpen(true)} active={projectsOpen || view === "project"}><Layers size={16} /></IconBtn>
             {view !== "dashboard" && view !== "project" && (
-              <IconBtn tk={tk} title="Filters" onClick={() => setFiltersOpen(true)} active={!!(filters.status || filters.priority || filters.categories.length > 0 || filters.tag)}>
+              <IconBtn tk={tk} title="Filters" onClick={() => setFiltersOpen(true)} active={!!(filters.statuses.length > 0 || filters.priorities.length > 0 || filters.categories.length > 0 || filters.tag)}>
                 <Filter size={16} />
               </IconBtn>
             )}
@@ -1572,7 +1636,7 @@ export default function TaskManagerApp() {
         {view === "project" && activeProjectId && projects.some((p) => p.id === activeProjectId) && (
           <ProjectView project={projects.find((p) => p.id === activeProjectId)} tasks={tasks} tk={tk} accent={accent}
             onOpen={openEdit} onAddTask={addTaskInProject} onRenameProject={renameProject} onDeleteProject={deleteProject}
-            onDeleteTask={deleteProjectTask} onReparentTask={reparentTask}
+            onDeleteTask={deleteProjectTask} onReparentTask={reparentTask} onMoveTask={moveSiblingTask}
             onClose={() => setView("dashboard")} orientation={orientation} setOrientation={setOrientation} />
         )}
       </div>
@@ -1582,7 +1646,7 @@ export default function TaskManagerApp() {
         onSelect={openProject} onCreate={createProject} onRename={renameProject} onDelete={deleteProject} accent={accent} />
 
       {modalTask && (
-        <TaskModal task={modalTask} tk={tk} categories={categories} allTasks={tasks} onClose={() => setModalTask(null)} onSave={saveTask} onDelete={deleteTask} onDuplicate={duplicateTask} accent={accent} />
+        <TaskModal task={modalTask} tk={tk} categories={categories} allTasks={tasks} projects={projects} onClose={() => setModalTask(null)} onSave={saveTask} onDelete={deleteTask} onDuplicate={duplicateTask} accent={accent} />
       )}
       <Toast toast={toast} tk={tk} />
     </div>
